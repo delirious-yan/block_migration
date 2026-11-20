@@ -1,0 +1,5 @@
+local-audit/
+discovery.json
+applications.csv
+gojira-fixture-*/
+*.log
