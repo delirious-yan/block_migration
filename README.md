@@ -15,11 +15,13 @@ PowerShell 7.2 or newer is required. Open the app with your normal Windows accou
 ## Manage storage
 
 - **Storage → Scan storage** shows the Windows locations of Downloads, Desktop, Documents, Pictures, Music and Videos. It also ranks folders in Local, Roaming and LocalLow AppData by visible file size. Sort by size, filter by area or search by folder name.
-- For Downloads and other local personal folders, select **Folder properties** and use the Windows **Location → Move** tab. Windows applies the new location and prompts about moving existing files. Use **Scan storage** to verify the resulting path and size. OneDrive-backed folders link to the OneDrive relocation procedure.
+- For Downloads and other local personal folders, select **Prepare move check** before opening **Folder properties → Location → Move**. Windows applies the new location and prompts about moving existing files. Then select **Verify move** in Gojira. It reads the current Windows path and compares the original relative paths, file content and named NTFS streams against the saved checklist. Scan storage again to refresh the sizes. OneDrive-backed folders link to the OneDrive relocation procedure.
+- Folder checks are read-only for the selected folder and persist locally under `%LOCALAPPDATA%\GojiraMigration\FolderChecks`. They require local folders on fixed NTFS drives and report unsupported links or offline entries. The check excludes the hidden, system-marked root `desktop.ini` that Windows can rewrite during redirection. The result checks content and location. Use Windows to manage permission inheritance and folder relocation itself.
 - AppData rows link to supported controls or guidance where available, including browser cache settings, NVIDIA shader-cache limits, and Windows package and storage settings. These actions open the corresponding Windows window, folder or vendor guide and leave the decision to the person using Gojira.
 - Sizes are logical file sizes. Linked, offline and unreadable items are skipped and counted. Browser and driver cache rows drill into the parent vendor folders, so those rows overlap. The AppData total comes from its three root scans.
 
 To view the read-only report from PowerShell, run `pwsh -NoProfile -File .\Storage.ps1`. To verify the Storage tab on your PC, run `pwsh -NoProfile -STA -File .\Gojira.ps1 -StorageSmokeTest`.
+Run `pwsh -NoProfile -File .\Test-GojiraFolderCheck.ps1` to exercise the before-and-after checks on dummy files.
 
 ## Audit and plan
 

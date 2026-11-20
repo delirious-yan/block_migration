@@ -3,6 +3,8 @@
 param(
     [Parameter(ParameterSetName='Scan')][string]$AppDataRoot,
     [Parameter(ParameterSetName='Scan')][switch]$SkipPersonalFolders,
+    [Parameter(ParameterSetName='Resolve',Mandatory)]
+    [ValidateSet('Downloads','Desktop','Documents','Pictures','Music','Videos')][string]$ResolvePersonalFolder,
     [Parameter(ParameterSetName='Properties',Mandatory)][string]$ShowProperties,
     [Parameter(ParameterSetName='Properties')][IntPtr]$OwnerWindow = [IntPtr]::Zero
 )
@@ -120,20 +122,31 @@ $knownFolders = [ordered]@{
     Music='4BD8D571-6D19-48D3-BE97-422220080E43'
     Videos='18989B1D-99B5-455B-841C-AB7C74E4DDFC'
 }
-$personal = @(if (!$SkipPersonalFolders) {
+function Get-PersonalFolderLocations([string[]]$Names) {
     $syncRoots = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)
     $syncRoots += @(Get-ChildItem -LiteralPath 'HKCU:\Software\Microsoft\OneDrive\Accounts' -ErrorAction SilentlyContinue |
         ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -Name UserFolder -ErrorAction SilentlyContinue).UserFolder })
-    foreach ($name in $knownFolders.Keys) {
+    foreach ($name in $Names) {
         $path = [Gojira.StorageFolders]::KnownFolder([guid]$knownFolders[$name])
         if (!$path -or ![IO.Directory]::Exists($path)) { continue }
-        $usage = [Gojira.StorageFolders]::Scan($path, 0)
         $synced = @($syncRoots | Where-Object { $_ -and ($path -eq $_ -or
             $path.StartsWith($_.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) }).Count -gt 0
-        if ($synced) {
-            New-StorageRow $usage 'Personal folders' $name 'OneDrive guidance' 'Use OneDrive to change the sync location. Cloud placeholders are skipped.' 'OneDrive'
+        [pscustomobject]@{Name=$name;Path=$path;Synced=$synced}
+    }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Resolve') {
+    Get-PersonalFolderLocations @($ResolvePersonalFolder)
+    return
+}
+
+$personal = @(if (!$SkipPersonalFolders) {
+    foreach ($folder in Get-PersonalFolderLocations @($knownFolders.Keys)) {
+        $usage = [Gojira.StorageFolders]::Scan($folder.Path, 0)
+        if ($folder.Synced) {
+            New-StorageRow $usage 'Personal folders' $folder.Name 'OneDrive guidance' 'Use OneDrive to change the sync location. Cloud placeholders are skipped.' 'OneDrive'
         } else {
-            New-StorageRow $usage 'Personal folders' $name 'Folder properties' 'Open the Location tab in Windows, then choose Move. Scan again after Windows finishes.' 'Location'
+            New-StorageRow $usage 'Personal folders' $folder.Name 'Folder properties' 'Use the Location tab in Windows to move this folder.' 'Location'
         }
     }
 })

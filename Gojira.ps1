@@ -5,7 +5,9 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Start G
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 Import-Module (Join-Path $PSScriptRoot 'Engine.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'FolderVerification.psm1') -Force
 $journal = Join-Path $env:LOCALAPPDATA 'GojiraMigration\Journal'
+$folderChecks = Join-Path $env:LOCALAPPDATA 'GojiraMigration\FolderChecks'
 $script:report = $null
 $script:work = $null
 $script:approvedPlan = $null
@@ -115,6 +117,8 @@ $storageQuery = [Windows.Forms.TextBox]@{Width=190; PlaceholderText='Find a fold
 $storageBar.Controls.Add($storageQuery)
 $storageAction = New-Button $storageBar 'Open action' { Open-StorageAction }
 $storageAction.Enabled = $false
+$storageCheck = New-Button $storageBar 'Prepare move check' { Invoke-StorageMoveCheck }
+$storageCheck.Enabled = $false
 [void](New-Button $storageBar 'Windows Storage' { Start-Process 'ms-settings:storagesense' })
 [void](New-Button $storageBar 'New content locations' { Start-Process 'ms-settings:savelocations' })
 $storageNote = [Windows.Forms.Label]@{Dock='Bottom'; Height=78; Padding=[Windows.Forms.Padding]::new(0,8,0,0);
@@ -267,9 +271,17 @@ function Start-StorageScan {
                 throw 'The Storage tab did not render personal folders, AppData rows and totals.'
             }
             $storageFilter.SelectedItem = 'AppData'
-            if ($storageGrid.Rows.Count -ne $appRows.Count) { throw 'The AppData filter did not select the expected rows.' }
+            if ($storageGrid.Rows.Count -ne $appRows.Count -or $storageCheck.Enabled) {
+                throw 'AppData showed an unexpected row or folder-move action.'
+            }
             $storageFilter.SelectedItem = 'Personal folders'
             if ($storageGrid.Rows.Count -ne $personalRows.Count) { throw 'The personal-folders filter did not select the expected rows.' }
+            $localRow = $storageGrid.Rows | Where-Object { $_.Tag.Kind -eq 'Location' } | Select-Object -First 1
+            if ($localRow) {
+                $storageGrid.CurrentCell = $localRow.Cells[0]
+                Update-StorageSelection
+                if (!$storageCheck.Enabled) { throw 'A local personal folder could not prepare a move check.' }
+            }
         }
         $script:storageScanCompleted = $true
         if ($StorageSmokeTest) { $form.Close() }
@@ -293,13 +305,62 @@ function Update-StorageSelection {
     $row = $storageGrid.CurrentRow.Tag
     $storageAction.Enabled = $null -ne $row
     $storageAction.Text = if ($row) { $row.Action } else { 'Open action' }
+    $storageCheck.Enabled = $false
+    $storageCheck.Text = 'Prepare move check'
     $roots = $script:storageReport.AppDataRoots
     $used = Format-GiB ($roots | Measure-Object Bytes -Sum).Sum
     $breakdown = ($roots | ForEach-Object { "$($_.Name) $(Format-GiB $_.Bytes) GiB" }) -join '  ·  '
     $line = "AppData visible file sizes: $used GiB   ·   $breakdown"
     $detail = if ($row) { $row.Guidance } else { 'Select a folder to see its available action.' }
     if ($row -and $row.Skipped) { $detail += "  $($row.Skipped) linked, offline, or unreadable items skipped." }
+    if ($row -and $row.Kind -eq 'Location') {
+        try {
+            $record = Get-GojiraFolderCheck -Name $row.Name -Store $folderChecks
+            $storageCheck.Enabled = $true
+            if ($record -and !$record.VerifiedAt) {
+                $storageCheck.Text = 'Verify move'
+                $detail = "Checklist saved for $($row.Name). Use Folder properties → Location → Move, then select Verify move."
+            } elseif ($record) {
+                $storageCheck.Text = 'Prepare new check'
+                $detail = "Verified $($record.Manifest.Files) files at $($record.Destination)."
+                if ($record.SourceStillPresent) { $detail += ' The old directory still existed at verification.' }
+            } else {
+                $detail = 'Prepare a move check before using Folder properties → Location → Move.'
+            }
+        } catch { $detail = "Could not read the saved checklist. $($_.Exception.Message)" }
+    }
     $storageNote.Text = $line + [Environment]::NewLine + $detail
+}
+
+function Invoke-StorageMoveCheck {
+    $row = $storageGrid.CurrentRow.Tag
+    if (!$row -or $row.Kind -ne 'Location') { throw 'Choose a local personal folder.' }
+    $saved = Get-GojiraFolderCheck -Name $row.Name -Store $folderChecks
+    $verify = [bool]($saved -and !$saved.VerifiedAt)
+    $title = if ($verify) { "Verifying the $($row.Name) move" } else { "Preparing the $($row.Name) move check" }
+    Start-Work $title {
+        param($root,$name,$store,$verify)
+        $ErrorActionPreference = 'Stop'
+        Import-Module (Join-Path $root 'FolderVerification.psm1') -Force
+        $folder = & (Join-Path $root 'Storage.ps1') -ResolvePersonalFolder $name
+        if (!$folder -or $folder.Synced) { throw 'The current folder must be available locally for a move check.' }
+        if ($verify) { Test-GojiraFolderCheck -Name $name -CurrentPath $folder.Path -Store $store }
+        else { Start-GojiraFolderCheck -Name $name -Path $folder.Path -Store $store }
+    } @($PSScriptRoot,$row.Name,$folderChecks,$verify) {
+        param($result,$context)
+        $record = $result[0]
+        if ($record.VerifiedAt) {
+            $message = "Verified $($record.Manifest.Files) original files at $($record.Destination)."
+            if ($record.SourceStillPresent) { $message += ' The old folder still exists.' }
+            $message += [Environment]::NewLine + 'Scan storage to refresh the folder list.'
+        } else {
+            $message = "Saved the checklist for $($record.Manifest.Files) files at $($record.Source)." +
+                [Environment]::NewLine + 'Use Folder properties → Location → Move. After Windows finishes, select Verify move.'
+        }
+        Write-Log $message
+        Update-StorageSelection
+        [void][Windows.Forms.MessageBox]::Show($form,$message,'Gojira folder move check')
+    }
 }
 
 function Open-StorageAction {
@@ -307,7 +368,10 @@ function Open-StorageAction {
     if (!$row) { return }
     switch ($row.Kind) {
         'Location' {
-            & (Join-Path $PSScriptRoot 'Storage.ps1') -ShowProperties $row.Path -OwnerWindow $form.Handle
+            $storageScript = Join-Path $PSScriptRoot 'Storage.ps1'
+            $current = & $storageScript -ResolvePersonalFolder $row.Name
+            if (!$current -or $current.Synced) { throw 'The folder location changed. Rescan Storage.' }
+            & $storageScript -ShowProperties $current.Path -OwnerWindow $form.Handle
         }
         'OneDrive' { Start-Process 'https://support.microsoft.com/en-gb/onedrive/change-the-location-of-your-onedrive-folder?nochrome=true' }
         'Chrome' { Start-Process 'https://chromeenterprise.google/policies/#DiskCacheDir' }
