@@ -1,5 +1,5 @@
 #requires -Version 7.2
-param([switch]$SmokeTest)
+param([switch]$SmokeTest, [switch]$StorageSmokeTest)
 $ErrorActionPreference = 'Stop'
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Start Gojira with pwsh -STA -File Gojira.ps1.' }
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
@@ -10,9 +10,11 @@ $script:report = $null
 $script:work = $null
 $script:approvedPlan = $null
 $script:scanCompleted = $false
+$script:storageReport = $null
+$script:storageScanCompleted = $false
 $script:dark = $false
 $queue = [Collections.Generic.List[object]]::new()
-$form = [Windows.Forms.Form]@{Text='Gojira  |  Application Migration'; Width=1420; Height=850;
+$form = [Windows.Forms.Form]@{Text='Gojira  |  Storage Management'; Width=1420; Height=850;
     MinimumSize=[Drawing.Size]::new(1000,650); StartPosition='CenterScreen'; Font=[Drawing.Font]::new('Segoe UI',10)}
 $tabs = [Windows.Forms.TabControl]@{ Dock='Fill'; Padding=[Drawing.Point]::new(16,8) }
 $status = [Windows.Forms.StatusStrip]::new()
@@ -97,6 +99,29 @@ $dashBar = New-Bar $dashboard
 $dashNote = [Windows.Forms.TextBox]@{Dock='Bottom'; Height=120; Multiline=$true; ReadOnly=$true; ScrollBars='Vertical'}
 $dashboard.Controls.Add($dashNote)
 $dashNote.BringToFront()
+
+$storagePage = New-Page 'Storage'
+$storageGrid = New-Grid $storagePage @('Folder','Area','GiB','Path','Action')
+$storageGrid.MultiSelect = $false
+$storageGrid.Columns['GiB'].ValueType = [double]
+$storageGrid.Columns['Folder'].FillWeight = 135
+$storageGrid.Columns['Path'].FillWeight = 240
+$storageGrid.Columns['Action'].FillWeight = 150
+$storageBar = New-Bar $storagePage
+[void](New-Button $storageBar 'Scan storage' { Start-StorageScan })
+$storageFilter = New-Combo $storageBar 160
+Set-Choices $storageFilter @('All folders','Personal folders','AppData')
+$storageQuery = [Windows.Forms.TextBox]@{Width=190; PlaceholderText='Find a folder'; Margin=[Windows.Forms.Padding]::new(0,8,10,4)}
+$storageBar.Controls.Add($storageQuery)
+$storageAction = New-Button $storageBar 'Open action' { Open-StorageAction }
+$storageAction.Enabled = $false
+[void](New-Button $storageBar 'Windows Storage' { Start-Process 'ms-settings:storagesense' })
+[void](New-Button $storageBar 'New content locations' { Start-Process 'ms-settings:savelocations' })
+$storageNote = [Windows.Forms.Label]@{Dock='Bottom'; Height=78; Padding=[Windows.Forms.Padding]::new(0,8,0,0);
+    Text='Scan storage to see your personal folders and AppData usage.'}
+$storagePage.Controls.Add($storageNote)
+$storageNote.BringToFront()
+
 $installed = New-Page 'Installed Applications'
 $appGrid = New-Grid $installed @('Application','Publisher','Version','MiB','Path','Risk','Relocation') -Check
 $appGrid.Columns['Path'].FillWeight = 220
@@ -223,10 +248,80 @@ $timer.Add_Tick({
     } catch {
         $statusText.Text = 'Operation requires review'
         Write-Log $_.Exception.Message
-        if ($SmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
+        if ($SmokeTest -or $StorageSmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
         else { Show-Error $_.Exception.Message; Refresh-History }
     } finally { $state.Shell.Dispose() }
 })
+
+function Start-StorageScan {
+    Start-Work 'Measuring personal folders and AppData' { param($scriptPath) & $scriptPath } @(
+        (Join-Path $PSScriptRoot 'Storage.ps1')
+    ) {
+        param($result)
+        $script:storageReport = $result[0]
+        Refresh-Storage
+        if ($StorageSmokeTest) {
+            $personalRows = @($storageGrid.Rows | Where-Object { $_.Tag.Area -eq 'Personal folders' })
+            $appRows = @($storageGrid.Rows | Where-Object { $_.Tag.Area -eq 'AppData' })
+            if (!$personalRows.Count -or !$appRows.Count -or !$script:storageReport.AppDataRoots.Count) {
+                throw 'The Storage tab did not render personal folders, AppData rows and totals.'
+            }
+            $storageFilter.SelectedItem = 'AppData'
+            if ($storageGrid.Rows.Count -ne $appRows.Count) { throw 'The AppData filter did not select the expected rows.' }
+            $storageFilter.SelectedItem = 'Personal folders'
+            if ($storageGrid.Rows.Count -ne $personalRows.Count) { throw 'The personal-folders filter did not select the expected rows.' }
+        }
+        $script:storageScanCompleted = $true
+        if ($StorageSmokeTest) { $form.Close() }
+    }
+}
+
+function Refresh-Storage {
+    if (!$script:storageReport) { return }
+    $storageGrid.Rows.Clear()
+    foreach ($row in $script:storageReport.Rows) {
+        if ($storageFilter.SelectedIndex -gt 0 -and $row.Area -ne $storageFilter.SelectedItem) { continue }
+        if ($storageQuery.Text -and $row.Name.IndexOf($storageQuery.Text,[StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        $size = if (!$row.Skipped -or $row.Files) { [math]::Round($row.Bytes / 1GB, 2) }
+        [void](Add-Row $storageGrid @($row.Name,$row.Area,$size,$row.Path,$row.Action) $row)
+    }
+    Update-StorageSelection
+}
+
+function Update-StorageSelection {
+    if (!$script:storageReport) { return }
+    $row = $storageGrid.CurrentRow.Tag
+    $storageAction.Enabled = $null -ne $row
+    $storageAction.Text = if ($row) { $row.Action } else { 'Open action' }
+    $roots = $script:storageReport.AppDataRoots
+    $used = Format-GiB ($roots | Measure-Object Bytes -Sum).Sum
+    $breakdown = ($roots | ForEach-Object { "$($_.Name) $(Format-GiB $_.Bytes) GiB" }) -join '  ·  '
+    $line = "AppData visible file sizes: $used GiB   ·   $breakdown"
+    $detail = if ($row) { $row.Guidance } else { 'Select a folder to see its available action.' }
+    if ($row -and $row.Skipped) { $detail += "  $($row.Skipped) linked, offline, or unreadable items skipped." }
+    $storageNote.Text = $line + [Environment]::NewLine + $detail
+}
+
+function Open-StorageAction {
+    $row = $storageGrid.CurrentRow.Tag
+    if (!$row) { return }
+    switch ($row.Kind) {
+        'Location' {
+            & (Join-Path $PSScriptRoot 'Storage.ps1') -ShowProperties $row.Path -OwnerWindow $form.Handle
+        }
+        'OneDrive' { Start-Process 'https://support.microsoft.com/en-gb/onedrive/change-the-location-of-your-onedrive-folder?nochrome=true' }
+        'Chrome' { Start-Process 'https://chromeenterprise.google/policies/#DiskCacheDir' }
+        'Edge' { Start-Process 'https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/diskcachedir' }
+        'Nvidia' { Start-Process 'https://www.nvidia.com/content/Control-Panel-Help/vLatest/en-us/mergedProjects/nv3d/Manage_3D_Settings_%28reference%29.htm#Shader_Cache_Size' }
+        'Temporary' { Start-Process 'ms-settings:storagesense' }
+        'Packages' { Start-Process 'ms-settings:appsfeatures' }
+        'Explore' {
+            if (![IO.Directory]::Exists($row.Path)) { throw 'The folder is no longer available. Rescan Storage.' }
+            $open = [Diagnostics.ProcessStartInfo]@{FileName=$row.Path; UseShellExecute=$true}
+            [void][Diagnostics.Process]::Start($open)
+        }
+    }
+}
 
 function Start-Scan {
     Start-Work 'Scanning installed applications and drives' { param($scriptPath) $ErrorActionPreference='Stop'; & $scriptPath } @(
@@ -402,6 +497,9 @@ function Verify-Launch {
 }
 
 $search.Add_TextChanged({ Refresh-Apps })
+$storageQuery.Add_TextChanged({ Refresh-Storage })
+$storageFilter.Add_SelectedIndexChanged({ Refresh-Storage })
+$storageGrid.Add_SelectionChanged({ Update-StorageSelection })
 foreach ($combo in @($sourceFilter,$riskFilter,$sizeFilter)) { $combo.Add_SelectedIndexChanged({ Refresh-Apps }) }
 $appGrid.Add_CellDoubleClick({ if ($_.RowIndex -ge 0) { Show-AppDetails } })
 $form.Add_FormClosing({ if ($script:work) { $_.Cancel = $true; Show-Error 'Wait for the current operation to finish.' } })
@@ -410,8 +508,11 @@ Set-Choices $destination @('Destination drive')
 Set-Theme $form
 Refresh-Queue
 $form.Add_Shown({
-    try { Start-Scan } catch {
-        if ($SmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
+    try {
+        if ($StorageSmokeTest) { $tabs.SelectedTab = $storagePage; Start-StorageScan }
+        else { Start-Scan }
+    } catch {
+        if ($SmokeTest -or $StorageSmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
         else { Show-Error $_.Exception.Message }
     }
 })
@@ -420,4 +521,8 @@ try { [void]$form.ShowDialog() } finally { $timer.Dispose(); $form.Dispose() }
 if ($SmokeTest) {
     if (!$script:scanCompleted) { throw "GUI scan did not complete. $script:scanFailure" }
     "PASS: GUI rendered $($script:report.Volumes.Count) volumes and $($script:report.Applications.Count) inventory rows."
+}
+if ($StorageSmokeTest) {
+    if (!$script:storageScanCompleted) { throw "Storage scan did not complete. $script:scanFailure" }
+    "PASS: Storage rendered and filtered $($script:storageReport.Rows.Count) rows."
 }

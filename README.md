@@ -1,6 +1,6 @@
 # Gojira
 
-Gojira is a native Windows 11 utility for auditing installed apps and relocating eligible, individually selected application directories between physical NTFS disks. It uses PowerShell 7, Windows Forms and Windows inbox tools.
+Gojira is a native Windows 11 utility for reviewing storage and relocating eligible application directories between physical NTFS disks. It uses PowerShell 7, Windows Forms and Windows inbox tools.
 
 ## Run locally
 
@@ -11,6 +11,15 @@ pwsh -NoProfile -STA -File .\Gojira.ps1
 ```
 
 PowerShell 7.2 or newer is required. Open the app with your normal Windows account for discovery. Use **Settings and Logs → Restart as administrator** when an operation needs access to protected paths, ownership or NTFS audit rules. Use the same Windows account after elevation to see the same journal.
+
+## Manage storage
+
+- **Storage → Scan storage** shows the Windows locations of Downloads, Desktop, Documents, Pictures, Music and Videos. It also ranks folders in Local, Roaming and LocalLow AppData by visible file size. Sort by size, filter by area or search by folder name.
+- For Downloads and other local personal folders, select **Folder properties** and use the Windows **Location → Move** tab. Windows applies the new location and prompts about moving existing files. Use **Scan storage** to verify the resulting path and size. OneDrive-backed folders link to the OneDrive relocation procedure.
+- AppData rows link to supported controls or guidance where available, including browser cache settings, NVIDIA shader-cache limits, and Windows package and storage settings. These actions open the corresponding Windows window, folder or vendor guide and leave the decision to the person using Gojira.
+- Sizes are logical file sizes. Linked, offline and unreadable items are skipped and counted. Browser and driver cache rows drill into the parent vendor folders, so those rows overlap. The AppData total comes from its three root scans.
+
+To view the read-only report from PowerShell, run `pwsh -NoProfile -File .\Storage.ps1`. To verify the Storage tab on your PC, run `pwsh -NoProfile -STA -File .\Gojira.ps1 -StorageSmokeTest`.
 
 ## Audit and plan
 
