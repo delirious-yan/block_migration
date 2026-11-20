@@ -1,5 +1,5 @@
 #requires -Version 7.2
-param([switch]$SmokeTest, [switch]$StorageSmokeTest)
+param([switch]$SmokeTest, [switch]$StorageSmokeTest, [switch]$LayoutSmokeTest)
 $ErrorActionPreference = 'Stop'
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Start Gojira with pwsh -STA -File Gojira.ps1.' }
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
@@ -18,6 +18,7 @@ $script:dark = $false
 $queue = [Collections.Generic.List[object]]::new()
 $form = [Windows.Forms.Form]@{Text='Gojira  |  Storage Management'; Width=1420; Height=850;
     MinimumSize=[Drawing.Size]::new(1000,650); StartPosition='CenterScreen'; Font=[Drawing.Font]::new('Segoe UI',10)}
+$headerFont = [Drawing.Font]::new($form.Font, [Drawing.FontStyle]::Bold)
 $tabs = [Windows.Forms.TabControl]@{ Dock='Fill'; Padding=[Drawing.Point]::new(16,8) }
 $status = [Windows.Forms.StatusStrip]::new()
 $statusText = [Windows.Forms.ToolStripStatusLabel]@{Text='Ready'; Spring=$true; TextAlign='MiddleLeft'}
@@ -35,7 +36,7 @@ function New-Page($Title) {
 function New-Bar($Parent) {
     $bar = [Windows.Forms.FlowLayoutPanel]@{Dock='Top'; Height=47; WrapContents=$false; AutoScroll=$true}
     $Parent.Controls.Add($bar)
-    $bar.BringToFront()
+    $bar.SendToBack()
     $bar
 }
 function New-Button($Parent,$Title,[scriptblock]$Click) {
@@ -53,6 +54,11 @@ function New-Grid($Parent, $Columns, [switch]$Check) {
         AllowUserToResizeRows=$false; RowHeadersVisible=$false; BorderStyle='None'; ReadOnly=!$Check;
         SelectionMode='FullRowSelect'; MultiSelect=$true; AutoSizeColumnsMode='Fill'; EnableHeadersVisualStyles=$false}
     $grid.RowTemplate.Height = 30
+    $grid.ColumnHeadersHeightSizeMode = 'DisableResizing'
+    $grid.ColumnHeadersHeight = 34
+    $grid.ColumnHeadersDefaultCellStyle.Font = $headerFont
+    $grid.ColumnHeadersDefaultCellStyle.Alignment = 'MiddleLeft'
+    $grid.ColumnHeadersDefaultCellStyle.Padding = [Windows.Forms.Padding]::new(4,0,4,0)
     if ($Check) {
         $box = [Windows.Forms.DataGridViewCheckBoxColumn]@{Name='Selected'; HeaderText='Select';
             AutoSizeMode='None'; Width=62; SortMode='NotSortable'}
@@ -100,7 +106,7 @@ $dashBar = New-Bar $dashboard
 [void](New-Button $dashBar 'Scan this PC' { Start-Scan })
 $dashNote = [Windows.Forms.TextBox]@{Dock='Bottom'; Height=120; Multiline=$true; ReadOnly=$true; ScrollBars='Vertical'}
 $dashboard.Controls.Add($dashNote)
-$dashNote.BringToFront()
+$dashNote.SendToBack()
 
 $storagePage = New-Page 'Storage'
 $storageGrid = New-Grid $storagePage @('Folder','Area','GiB','Path','Action')
@@ -124,7 +130,7 @@ $storageCheck.Enabled = $false
 $storageNote = [Windows.Forms.Label]@{Dock='Bottom'; Height=78; Padding=[Windows.Forms.Padding]::new(0,8,0,0);
     Text='Scan storage to see your personal folders and AppData usage.'}
 $storagePage.Controls.Add($storageNote)
-$storageNote.BringToFront()
+$storageNote.SendToBack()
 
 $installed = New-Page 'Installed Applications'
 $appGrid = New-Grid $installed @('Application','Publisher','Version','MiB','Path','Risk','Relocation') -Check
@@ -153,7 +159,7 @@ $destination = New-Combo $queueBar 155
 [void](New-Button $queueBar 'Clear queue' { $queue.Clear(); Refresh-Queue })
 $queueNote = [Windows.Forms.Label]@{Dock='Bottom'; Height=38}
 $queuePage.Controls.Add($queueNote)
-$queueNote.BringToFront()
+$queueNote.SendToBack()
 
 $historyPage = New-Page 'Migration History'
 $historyGrid = New-Grid $historyPage @('Application','Stage','Original path','Destination','Updated (UTC)','Transaction')
@@ -194,10 +200,12 @@ function Set-Theme($Control) {
     $background = [Drawing.Color]::FromArgb(245,247,252)
     $surface = [Drawing.Color]::White
     $foreground = [Drawing.Color]::FromArgb(28,36,52)
+    $header = [Drawing.Color]::FromArgb(226,233,244)
     if ($script:dark) {
         $background = [Drawing.Color]::FromArgb(28,32,43)
         $surface = [Drawing.Color]::FromArgb(38,44,58)
         $foreground = [Drawing.Color]::FromArgb(236,241,248)
+        $header = [Drawing.Color]::FromArgb(49,62,84)
     }
     $Control.BackColor = $background
     $Control.ForeColor = $foreground
@@ -206,8 +214,10 @@ function Set-Theme($Control) {
         $Control.GridColor = $background
         $Control.DefaultCellStyle.BackColor = $surface
         $Control.DefaultCellStyle.ForeColor = $foreground
-        $Control.ColumnHeadersDefaultCellStyle.BackColor = $background
+        $Control.ColumnHeadersDefaultCellStyle.BackColor = $header
         $Control.ColumnHeadersDefaultCellStyle.ForeColor = $foreground
+        $Control.ColumnHeadersDefaultCellStyle.SelectionBackColor = $header
+        $Control.ColumnHeadersDefaultCellStyle.SelectionForeColor = $foreground
         return
     }
     if ($Control -is [Windows.Forms.TextBox] -or $Control -is [Windows.Forms.ComboBox]) { $Control.BackColor = $surface }
@@ -560,6 +570,38 @@ function Verify-Launch {
     } finally { $picker.Dispose() }
 }
 
+function Test-GridHeaderLayout {
+    $count = 0
+    foreach ($isDark in $false,$true) {
+        $script:dark = $isDark
+        Set-Theme $form
+        foreach ($size in @($form.MinimumSize,[Drawing.Size]::new(1420,850))) {
+            $form.Size = $size
+            foreach ($pair in @(
+                @($dashboard,$driveGrid),@($storagePage,$storageGrid),@($installed,$appGrid),
+                @($queuePage,$queueGrid),@($historyPage,$historyGrid),@($recovery,$recoveryGrid)
+            )) {
+                $page,$grid = $pair
+                $tabs.SelectedTab = $page
+                $page.PerformLayout()
+                $headerBounds = $grid.GetCellDisplayRectangle(0,-1,$true)
+                if (!$grid.ColumnHeadersVisible -or $headerBounds.Height -lt $grid.ColumnHeadersHeight -or
+                    !$grid.Columns[0].HeaderText) { throw "Missing or clipped headers on $($page.Text)." }
+                foreach ($control in $page.Controls | Where-Object { $_.Dock -in 'Top','Bottom' }) {
+                    if ($grid.Bounds.IntersectsWith($control.Bounds)) {
+                        throw "A toolbar or footer covers the grid on $($page.Text)."
+                    }
+                }
+                if ($grid.ColumnHeadersDefaultCellStyle.ForeColor -eq $grid.ColumnHeadersDefaultCellStyle.BackColor) {
+                    throw "Header text and background match on $($page.Text)."
+                }
+                $count++
+            }
+        }
+    }
+    "PASS: $count grid layouts showed a full header row in both themes and window sizes."
+}
+
 $search.Add_TextChanged({ Refresh-Apps })
 $storageQuery.Add_TextChanged({ Refresh-Storage })
 $storageFilter.Add_SelectedIndexChanged({ Refresh-Storage })
@@ -573,15 +615,22 @@ Set-Theme $form
 Refresh-Queue
 $form.Add_Shown({
     try {
-        if ($StorageSmokeTest) { $tabs.SelectedTab = $storagePage; Start-StorageScan }
+        if ($LayoutSmokeTest) {
+            $script:layoutResult = Test-GridHeaderLayout
+            $form.Close()
+        } elseif ($StorageSmokeTest) { $tabs.SelectedTab = $storagePage; Start-StorageScan }
         else { Start-Scan }
     } catch {
-        if ($SmokeTest -or $StorageSmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
+        if ($SmokeTest -or $StorageSmokeTest -or $LayoutSmokeTest) { $script:scanFailure = $_.Exception.Message; $form.Close() }
         else { Show-Error $_.Exception.Message }
     }
 })
 $timer.Start()
-try { [void]$form.ShowDialog() } finally { $timer.Dispose(); $form.Dispose() }
+try { [void]$form.ShowDialog() } finally { $timer.Dispose(); $form.Dispose(); $headerFont.Dispose() }
+if ($LayoutSmokeTest) {
+    if (!$script:layoutResult) { throw "Header layout test did not pass. $script:scanFailure" }
+    $script:layoutResult
+}
 if ($SmokeTest) {
     if (!$script:scanCompleted) { throw "GUI scan did not complete. $script:scanFailure" }
     "PASS: GUI rendered $($script:report.Volumes.Count) volumes and $($script:report.Applications.Count) inventory rows."
